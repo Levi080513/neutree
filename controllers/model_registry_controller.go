@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
@@ -16,12 +15,9 @@ import (
 )
 
 type ModelRegistryController struct {
-	*storage.Storage
-	queue workqueue.RateLimitingInterface
+	storage *storage.Storage
 
-	workers int
-
-	syncInterval time.Duration
+	baseController *BaseController
 }
 
 type ModelRegistryControllerOption struct {
@@ -31,10 +27,12 @@ type ModelRegistryControllerOption struct {
 
 func NewModelRegistryController(option *ModelRegistryControllerOption) (*ModelRegistryController, error) {
 	c := &ModelRegistryController{
-		queue:        workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: "model-registry"}),
-		workers:      option.Workers,
-		Storage:      option.Storage,
-		syncInterval: time.Second * 10,
+		baseController: &BaseController{
+			queue:        workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: "model-registry"}),
+			workers:      option.Workers,
+			syncInterval: time.Second * 10,
+		},
+		storage: option.Storage,
 	}
 
 	return c, nil
@@ -43,53 +41,32 @@ func NewModelRegistryController(option *ModelRegistryControllerOption) (*ModelRe
 func (c *ModelRegistryController) Start(ctx context.Context) {
 	klog.Infof("Starting model registry controller")
 
-	defer c.queue.ShutDown()
-
-	for i := 0; i < c.workers; i++ {
-		go wait.UntilWithContext(ctx, c.worker, time.Second)
-	}
-
-	wait.Until(c.reconcileAll, c.syncInterval, ctx.Done())
-	<-ctx.Done()
+	c.baseController.Start(ctx, c)
 }
 
-func (c *ModelRegistryController) worker(ctx context.Context) { //nolint:unparam
-	for c.processNextWorkItem() {
-	}
+func (c *ModelRegistryController) Sync(obj interface{}) error {
+	return c.sync(obj.(*v1.ModelRegistry))
 }
 
-func (c *ModelRegistryController) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
-	if quit {
-		return false
+func (c *ModelRegistryController) ListObjects() ([]interface{}, error) {
+	registries, err := c.storage.ListModelRegistry(storage.ListOption{})
+	if err != nil {
+		return nil, err
 	}
-	defer c.queue.Done(obj)
 
-	modelRegistry, ok := obj.(*v1.ModelRegistry)
+	objs := make([]interface{}, len(registries))
+	for i := range registries {
+		objs[i] = &registries[i]
+	}
+	return objs, nil
+}
+
+func (c *ModelRegistryController) ProcessObject(obj interface{}) (interface{}, error) {
+	registry, ok := obj.(*v1.ModelRegistry)
 	if !ok {
-		klog.Errorf("failed to assert obj to ModelRegistry")
-		return true
+		return nil, errors.New("failed to assert obj to ModelRegistry")
 	}
-
-	err := c.sync(modelRegistry)
-	if err != nil {
-		klog.Errorf("failed to sync model registry %s: %v ", modelRegistry.Metadata.Name, err)
-		return true
-	}
-
-	return true
-}
-
-func (c *ModelRegistryController) reconcileAll() {
-	modelRegistries, err := c.Storage.ListModelRegistry(storage.ListOption{})
-	if err != nil {
-		klog.Errorf("failed to list model registry: %v", err)
-		return
-	}
-
-	for i := range modelRegistries {
-		c.queue.Add(&modelRegistries[i])
-	}
+	return registry, nil
 }
 
 func (c *ModelRegistryController) sync(obj *v1.ModelRegistry) (err error) {
@@ -102,7 +79,7 @@ func (c *ModelRegistryController) sync(obj *v1.ModelRegistry) (err error) {
 		if obj.Status.Phase == v1.ModelRegistryPhaseDELETED {
 			klog.Info("Deleted model registry " + obj.Metadata.Name)
 
-			err = c.Storage.DeleteModelRegistry(strconv.Itoa(obj.ID))
+			err = c.storage.DeleteModelRegistry(strconv.Itoa(obj.ID))
 			if err != nil {
 				return errors.Wrap(err, "failed to delete model registry "+obj.Metadata.Name)
 			}
@@ -185,7 +162,7 @@ func (c *ModelRegistryController) updateStatus(obj *v1.ModelRegistry, phase v1.M
 		obj.Status.ErrorMessage = err.Error()
 	}
 
-	updateStatusErr := c.Storage.UpdateModelRegistry(strconv.Itoa(obj.ID), obj)
+	updateStatusErr := c.storage.UpdateModelRegistry(strconv.Itoa(obj.ID), obj)
 	if err != nil {
 		return errors.Wrap(updateStatusErr, "failed to update model registry "+obj.Metadata.Name)
 	}

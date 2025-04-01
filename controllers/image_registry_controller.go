@@ -8,7 +8,6 @@ import (
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	"github.com/pkg/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
@@ -17,14 +16,11 @@ import (
 )
 
 type ImageRegistryController struct {
-	*storage.Storage
-	queue workqueue.RateLimitingInterface
-
-	workers int
-
-	syncInterval time.Duration
+	storage *storage.Storage
 
 	dockerClient *client.Client
+
+	baseController *BaseController
 }
 
 type ImageRegistryControllerOption struct {
@@ -34,10 +30,12 @@ type ImageRegistryControllerOption struct {
 
 func NewImageRegistryController(option *ImageRegistryControllerOption) (*ImageRegistryController, error) {
 	c := &ImageRegistryController{
-		queue:        workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: "image-registry"}),
-		workers:      option.Workers,
-		Storage:      option.Storage,
-		syncInterval: time.Second * 10,
+		baseController: &BaseController{
+			queue:        workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: "image-registry"}),
+			workers:      option.Workers,
+			syncInterval: time.Second * 10,
+		},
+		storage: option.Storage,
 	}
 
 	var err error
@@ -54,53 +52,32 @@ func NewImageRegistryController(option *ImageRegistryControllerOption) (*ImageRe
 func (c *ImageRegistryController) Start(ctx context.Context) {
 	klog.Infof("Starting image registry controller")
 
-	defer c.queue.ShutDown()
-
-	for i := 0; i < c.workers; i++ {
-		go wait.UntilWithContext(ctx, c.worker, time.Second)
-	}
-
-	wait.Until(c.reconcileAll, c.syncInterval, ctx.Done())
-	<-ctx.Done()
+	c.baseController.Start(ctx, c)
 }
 
-func (c *ImageRegistryController) worker(ctx context.Context) { //nolint:unparam
-	for c.processNextWorkItem() {
-	}
+func (c *ImageRegistryController) Sync(obj interface{}) error {
+	return c.sync(obj.(*v1.ImageRegistry))
 }
 
-func (c *ImageRegistryController) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
-	if quit {
-		return false
+func (c *ImageRegistryController) ListObjects() ([]interface{}, error) {
+	registries, err := c.storage.ListImageRegistry(storage.ListOption{})
+	if err != nil {
+		return nil, err
 	}
-	defer c.queue.Done(obj)
 
-	imageRegistry, ok := obj.(*v1.ImageRegistry)
+	objs := make([]interface{}, len(registries))
+	for i := range registries {
+		objs[i] = &registries[i]
+	}
+	return objs, nil
+}
+
+func (c *ImageRegistryController) ProcessObject(obj interface{}) (interface{}, error) {
+	registry, ok := obj.(*v1.ImageRegistry)
 	if !ok {
-		klog.Errorf("failed to assert obj to ImageRegistry")
-		return true
+		return nil, errors.New("failed to assert obj to ImageRegistry")
 	}
-
-	err := c.sync(imageRegistry)
-	if err != nil {
-		klog.Errorf("failed to sync image registry %s: %v ", imageRegistry.Metadata.Name, err)
-		return true
-	}
-
-	return true
-}
-
-func (c *ImageRegistryController) reconcileAll() {
-	imageRegistries, err := c.Storage.ListImageRegistry(storage.ListOption{})
-	if err != nil {
-		klog.Errorf("failed to list image registry: %v", err)
-		return
-	}
-
-	for i := range imageRegistries {
-		c.queue.Add(&imageRegistries[i])
-	}
+	return registry, nil
 }
 
 func (c *ImageRegistryController) sync(obj *v1.ImageRegistry) error {
@@ -110,7 +87,7 @@ func (c *ImageRegistryController) sync(obj *v1.ImageRegistry) error {
 		if obj.Status.Phase == v1.ImageRegistryPhaseDELETED {
 			klog.Info("Deleted image registry " + obj.Metadata.Name)
 
-			err = c.Storage.DeleteImageRegistry(strconv.Itoa(obj.ID))
+			err = c.storage.DeleteImageRegistry(strconv.Itoa(obj.ID))
 			if err != nil {
 				return errors.Wrap(err, "failed to delete image registry "+obj.Metadata.Name)
 			}
@@ -176,7 +153,7 @@ func (c *ImageRegistryController) updateStatus(obj *v1.ImageRegistry, phase v1.I
 		obj.Status.ErrorMessage = err.Error()
 	}
 
-	updateStatusErr := c.Storage.UpdateImageRegistry(strconv.Itoa(obj.ID), obj)
+	updateStatusErr := c.storage.UpdateImageRegistry(strconv.Itoa(obj.ID), obj)
 	if err != nil {
 		return errors.Wrap(updateStatusErr, "failed to update image registry "+obj.Metadata.Name)
 	}
