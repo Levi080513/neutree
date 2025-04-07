@@ -141,7 +141,6 @@ func TestClusterController_Sync_relateImageRegistry(t *testing.T) {
 }
 
 func TestClusterController_Sync_Delete(t *testing.T) {
-	testHeadIP := "192.168.1.1"
 	testConnectedImageRegistry := v1.ImageRegistry{
 		ID: 1,
 		Metadata: &v1.Metadata{
@@ -172,6 +171,9 @@ func TestClusterController_Sync_Delete(t *testing.T) {
 				Type:          "ssh",
 				Version:       "v2",
 			},
+			Status: &v1.ClusterStatus{
+				Phase: v1.ClusterPhaseDeleted,
+			},
 		}
 	}
 
@@ -182,8 +184,39 @@ func TestClusterController_Sync_Delete(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name: "Deleted -> Deleted (storage delete success)",
+			name:  "Deleted -> Deleted (storage delete success)",
+			input: getTestCluster(),
+			mockSetup: func(input *v1.Cluster, s *storagemocks.MockStorage, o *orchestratormocks.MockOrchestrator) {
+				s.On("ListImageRegistry", mock.Anything).Return([]v1.ImageRegistry{testConnectedImageRegistry}, nil)
+				s.On("DeleteCluster", "1").Return(nil)
+			},
+			wantErr: false,
 		},
+		{
+			name:  "Deleted -> Deleted (storage delete error)",
+			input: getTestCluster(),
+			mockSetup: func(input *v1.Cluster, s *storagemocks.MockStorage, o *orchestratormocks.MockOrchestrator) {
+				s.On("ListImageRegistry", mock.Anything).Return([]v1.ImageRegistry{testConnectedImageRegistry}, nil)
+				s.On("DeleteCluster", "1").Return(assert.AnError)
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := new(storagemocks.MockStorage)
+			imageSvc := new(registrymocks.MockImageService)
+			o := new(orchestratormocks.MockOrchestrator)
+			tt.mockSetup(tt.input, storage, o)
+			c := newTestClusterController(storage, imageSvc, o)
+			err := c.sync(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
 	}
 }
 
