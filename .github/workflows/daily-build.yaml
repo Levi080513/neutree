@@ -13,17 +13,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-<<<<<<< HEAD
       - name: Create Nightly Tag
         id: create_nightly_tag
-=======
-        env:
-          GITHUB_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
-      - name: Create Nightly Tag
-        id: create_nightly_tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
->>>>>>> ab52bb3 (fix: daily build can not trigger release workflow)
         run: |
           DATE=$(date +'%Y%m%d')
           git tag v0.1.0-nightly-$DATE
